@@ -110,33 +110,42 @@ FaceRecognition112V1S8 recognizer;
 int8_t recognition_enabled = 1;
 bool faceRecognized = true;
 
-// LED configuration
-#if CONFIG_LED_ILLUMINATOR_ENABLED
-int led_duty = 0;
-bool isStreaming = false;
-#endif
-// Add these functions before setup()
-std::list<dl::detect::result_t> detect_faces(camera_fb_t *fb, uint8_t *converted_buf) {
-  std::list<dl::detect::result_t> results;
-    
-  if (fb->format == PIXFORMAT_RGB565) {
-    #if TWO_STAGE
-      auto candidates = s1.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
-      results = s2.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3}, candidates);
-    #else
-      results = s1.infer((uint16_t *)fb->buf, {(int)fb->height, (int)fb->width, 3});
-    #endif
-  } else if (converted_buf) {
-    #if TWO_STAGE
-      auto candidates = s1.infer(converted_buf, {(int)fb->height, (int)fb->width, 3});
-      results = s2.infer(converted_buf, {(int)fb->height, (int)fb->width, 3}, candidates);
-    #else
-      results = s1.infer(converted_buf, {(int)fb->height, (int)fb->width, 3});
-    #endif
-  }
-  return results;
-}
+SemaphoreHandle_t dataMutex;
+SemaphoreHandle_t cameraMutex;
+volatile float sharedTemp = 0.0;
+float hx711Data[4] = {0.0, 0.0, 0.0, 0.0};
+String faceEnrollID = "";
+bool pillboxFlags[4] = {false, false, false, false};
 
+bool pillboxTaskRunning = false;
+bool registerFlag = false;
+bool startButtonPressed = false;
+static bool pillboxTrigger = false;
+TaskHandle_t sensorTaskHandle = NULL;
+TaskHandle_t pillboxTaskHandle = NULL;
+TaskHandle_t faceTaskHandle = NULL;
+TaskHandle_t uartTaskHandle = NULL;
+TaskHandle_t thingsboardTaskHandle = NULL;
+volatile bool faceTaskRunning = false;
+
+// UART communication
+QueueHandle_t uartCmdQueue;
+QueueHandle_t uartRespQueue;
+
+// Forward Declarations
+void thingsboardTask(void*);
+void sensorTask(void*);
+void pillboxControlTask(void*);
+void faceRecognitionTask(void*);
+void uartCommunicationTask(void*);
+void parseHX711Data(const String&);
+std::list<dl::detect::result_t> detect_faces(camera_fb_t*, uint8_t*);
+bool recognize_faces(uint8_t*, int, int, std::list<dl::detect::result_t>&, String);
+void enroll_faces_from_sd(String);
+String sendCommandAndWait(const String&, uint32_t timeout = 3000);
+void setupWiFi();
+void reconnectMQTT();
+void onMqttMessage(char* topic, byte* payload, unsigned int length);
 // Enhanced recognition function
 bool recognize_faces(uint8_t *frame_data, int width, int height, std::list<dl::detect::result_t> &faces) {
   // Create tensor from frame data
@@ -239,71 +248,38 @@ void enroll_faces_from_sd(String folder) {
     Serial.println("SD Card unmounted");
 }
 
-// The Firebase Storage download callback function
-void fcsDownloadCallback(FCS_DownloadStatusInfo info)
-{
-    if (info.status == firebase_fcs_download_status_init)
-    {
-        Serial.printf("Downloading file %s (%d) to %s\n", info.remoteFileName.c_str(), info.fileSize, info.localFileName.c_str());
-    }
-    else if (info.status == firebase_fcs_download_status_download)
-    {
-        Serial.printf("Downloaded %d%s, Elapsed time %d ms\n", (int)info.progress, "%", info.elapsedTime);
-    }
-    else if (info.status == firebase_fcs_download_status_complete)
-    {
-        Serial.println("Download completed\n");
-    }
-    else if (info.status == firebase_fcs_download_status_error)
-    {
-        Serial.printf("Download failed, %s\n", info.errorMsg.c_str());
-    }
-}
-bool copyFile(fs::FS &srcFS, String srcPath, fs::FS &dstFS, String dstPath, String id) {
-  if(!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 1)) {  // Mount SD card
-    Serial.println("Card Mount Failed");
-  }
-  uint8_t cardType = SD_MMC.cardType();  // Get SD card type
-  if(cardType == CARD_NONE){
-    Serial.println("No SD_MMC card attached");
-  }  
-  File srcFile = srcFS.open(srcPath);
-  if (!srcFile || srcFile.isDirectory()) {
-    Serial.println("Source file open failed");
-    return false;
-  }
-  if (!SD_MMC.exists("/"+id)) {
-    if (SD_MMC.mkdir("/"+id)) {
-      Serial.println("Created folder /"+id);
-    } else {
-      Serial.println("Failed to create /"+id +"folder");
-    }
-  }
-
-  File dstFile = dstFS.open(dstPath, FILE_WRITE);
-  if (!dstFile) {
-    Serial.println("Destination file open failed");
-    srcFile.close();
-    return false;
-  }
-
-  Serial.println("📦 Copying...");
-  uint8_t buf[512];
-  size_t bytesRead;
-  while ((bytesRead = srcFile.read(buf, sizeof(buf))) > 0) {
-    dstFile.write(buf, bytesRead);
-  }
-
-  srcFile.close();
-  dstFile.close();
-  SD_MMC.end();
-  Serial.println("SD Card unmounted");
-  return true;
-}
 void setup() {
-  Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  SerialPort.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+    Serial.begin(115200);
+  Serial.println("Starting ESP32-S3 MedCare System with ThingsBoard...");
+  
+  // Initialize mutexes (same as original)
+  dataMutex = xSemaphoreCreateMutex();
+  cameraMutex = xSemaphoreCreateMutex();
+  
+  if (!dataMutex || !cameraMutex) {
+    Serial.println("Failed to create mutexes!");
+    while(1) delay(1000);
+  }
+  
+  // Pre-allocate image buffers (same as original)
+  rgbBuffer = (uint8_t*)heap_caps_malloc(RGB_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  jpgBuffer = (uint8_t*)heap_caps_malloc(JPG_BUF_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  
+  if (!rgbBuffer || !jpgBuffer) {
+    Serial.println("PSRAM allocation failed! Using internal RAM");
+    if (rgbBuffer) heap_caps_free(rgbBuffer);
+    if (jpgBuffer) heap_caps_free(jpgBuffer);
+    
+    rgbBuffer = (uint8_t*)malloc(RGB_BUF_SIZE);
+    jpgBuffer = (uint8_t*)malloc(JPG_BUF_SIZE);
+  }
+  
+  if (!rgbBuffer || !jpgBuffer) {
+    Serial.println("CRITICAL: Memory allocation failed!");
+    while(1) delay(1000);
+  }
+  
+  // Camera initialization (same as original camera_config_t setup)
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -325,88 +301,85 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.frame_size = FRAMESIZE_QVGA;
-  config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
+  config.pixel_format = PIXFORMAT_RGB565;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
   config.fb_count = 1;
   
-  // Camera init
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x", err);
+    Serial.printf("Camera init failed with error 0x%x\n", err);
     return;
   }
-  Wire.begin(4, 5);
-  Wire.setClock(100000); // Explicitly set 100 kHz
-  // initialize LCD
+  Serial.println("Camera initialized");
+  
+  // Initialize I2C, LCD, BMP280 (same as original)
+  Wire.begin(45, 48);
+  Wire.setClock(100000);
+  
   lcd.init();
-  // turn on LCD backlight                      
   lcd.backlight();
+  lcd.clear();
+  Serial.println("LCD initialized");
+  
+  // WiFi connection
+  setupWiFi();
+  
+  // ThingsBoard MQTT setup
+  mqttClient.setServer(mqttServer, 1883);
+  mqttClient.setCallback(onMqttMessage);
+  
+  // Initialize BMP280 (same as original)
   if (!bmp.begin(0x76)) {
-    Serial.println(F("Could not find a valid BMP280 sensor, check wiring or "
-                      "try a different address!"));
-    while (1) delay(10);
+    Serial.println(F("BMP280 sensor not found"));
+  } else {
+    bmp.setSampling(Adafruit_BMP280::MODE_FORCED,
+                    Adafruit_BMP280::SAMPLING_X2,
+                    Adafruit_BMP280::SAMPLING_X16,
+                    Adafruit_BMP280::FILTER_X16,
+                    Adafruit_BMP280::STANDBY_MS_500);
+    Serial.println("BMP280 initialized");
   }
-    /* Default settings from datasheet. */
-  bmp.setSampling(Adafruit_BMP280::MODE_FORCED,     /* Operating Mode. */   
-                  Adafruit_BMP280::SAMPLING_X2,     /* Temp. oversampling */
-                  Adafruit_BMP280::SAMPLING_X16,    /* Pressure oversampling */
-                  Adafruit_BMP280::FILTER_X16,      /* Filtering. */
-                  Adafruit_BMP280::STANDBY_MS_500); /* Standby time. */
-
-
-  pinMode(RELAY_PIN, OUTPUT); 
-
-  WiFi.begin(ssid, password);
-  Serial.print("Connecting to Wi-Fi");
-    // set cursor to first column, first row
-  lcd.setCursor(0, 0);
-  // print message
-  lcd.print("Connecting to Wi-Fi");
-  delay(1000);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.print(".");
-    delay(300);
-  }
-  Serial.println();
-  Serial.print("Connected with IP: ");
-  Serial.println(WiFi.localIP());
-  Serial.println();
-
-  Serial.printf("Firebase Client v%s\n\n", FIREBASE_CLIENT_VERSION);
- 
-  /* Assign the api key (required) */
-  config2.api_key = API_KEY;
-  config2.database_url = DATABASE_URL;
-  /* Assign the user sign in credentials */
-  auth.user.email = USER_EMAIL;
-  auth.user.password = USER_PASSWORD;
-  /* Assign the callback function for the long running token generation task */
-  config2.token_status_callback = tokenStatusCallback; // see addons/TokenHelper.h
-
-  // Comment or pass false value when WiFi reconnection will control by your code or third party library e.g. WiFiManager
-  Firebase.reconnectNetwork(true);
-  config2.timeout.serverResponse = 30000;
-  config2.fcs.download_buffer_size = 4096;
-  fbdo.setBSSLBufferSize(4096, 1024);
-
-  Firebase.begin(&config2, &auth);
-  Firebase.reconnectWiFi(true);
-
-
-  if (!LittleFS.begin(true)) {
+  
+  // Initialize UART (same as original)
+  SerialPort.begin(115200, SERIAL_8N1, UART_RX_PIN, UART_TX_PIN);
+  Serial.println("UART initialized");
+  
+  // Initialize file systems (same as original)
+  SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
+  
+  if(!LittleFS.begin(true)) {
     Serial.println("LittleFS Mount Failed");
-    return;  
+  } else {
+    Serial.println("LittleFS mounted");
   }
-  Serial.println("LittleFS Mount");
-  SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);  // Set SD card pins
-  // Initialize face recognition filter
-  Serial.printf("App Partition Size: %dMB\n", ESP.getFlashChipSize()/(1024*1024));
-  ra_filter_init(&ra_filter, RA_FILTER_SIZE);
+  
+  if(!SD_MMC.begin("/sdcard", true)) {
+    Serial.println("SD Card Mount Failed");
+  } else {
+    Serial.println("SD Card mounted");
+  }
+  
+  // Create UART queues 
+  uartCmdQueue = xQueueCreate(5, 50);
+  uartRespQueue = xQueueCreate(5, 50);
+  
+  // Create tasks
+  BaseType_t result;
+  
+  result = xTaskCreatePinnedToCore(thingsboardTask, "ThingsBoard", 8192, NULL, 1, &thingsboardTaskHandle, 1);
+  if (result != pdPASS) Serial.println("Failed to create ThingsBoard task");
+  
+  result = xTaskCreatePinnedToCore(sensorTask, "Sensor", 8192, NULL, 2, &sensorTaskHandle, 1);
+  if (result != pdPASS) Serial.println("Failed to create Sensor task");
+  
+  result = xTaskCreatePinnedToCore(uartCommunicationTask, "UART", 4096, NULL, 3, &uartTaskHandle, 1);
+  if (result != pdPASS) Serial.println("Failed to create UART task");
+  
+  Serial.println("Setup completed!");
 }
+
 void loop() {
   }
 
