@@ -52,26 +52,6 @@ Adafruit_BMP280 bmp; // I2C
 #define SD_MMC_CLK 39 //Please do not modify it.
 #define SD_MMC_D0  40 //Please do not modify it.
 
-// Add right after includes
-typedef struct {
-    size_t size;
-    size_t index;
-    size_t count;
-    int sum;
-    int *values;
-} ra_filter_t;
-
-#define RA_FILTER_SIZE 10
-static ra_filter_t ra_filter;
-
-static ra_filter_t* ra_filter_init(ra_filter_t *filter, size_t sample_size) {
-    memset(filter, 0, sizeof(ra_filter_t));
-    filter->values = (int *)malloc(sample_size * sizeof(int));
-    if (!filter->values) return NULL;
-    memset(filter->values, 0, sample_size * sizeof(int));
-    filter->size = sample_size;
-    return filter;
-}
 // Camera configuration (adjust for your module)
 #define PWDN_GPIO_NUM -1
 #define RESET_GPIO_NUM -1
@@ -147,106 +127,6 @@ void setupWiFi();
 void reconnectMQTT();
 void onMqttMessage(char* topic, byte* payload, unsigned int length);
 // Enhanced recognition function
-bool recognize_faces(uint8_t *frame_data, int width, int height, std::list<dl::detect::result_t> &faces) {
-  // Create tensor from frame data
-  Tensor<uint8_t> tensor;
-  tensor.set_element(frame_data)
-        .set_shape({height, width, 3})
-        .set_auto_free(false);
-
-  for (auto &face : faces) {
-    face_info_t recognition = recognizer.recognize(tensor, face.keypoint);
-    if (recognition.id >= 0) {
-      lcd.printf("Recognized Face ID: %d (Confidence: %.2f)\n",
-                recognition.id, recognition.similarity);
-      return false;
-    } 
-    else {
-      lcd.println("Unknown Face Detected");
-      return true;
-    }
-  }
-}
-
-
-#define FACE_ID_SAVE_NUMBER 7  // adjust if needed
-
-void enroll_faces_from_sd(String folder) {
-    if (!SD_MMC.begin("/sdcard", true, true, SDMMC_FREQ_DEFAULT, 1)) {
-        Serial.println("Card Mount Failed");
-        return;
-    }
-    Serial.println("Card Mounted");
-
-    for (int i = 0; i < 7; ++i) {
-        if (recognizer.get_enrolled_id_num() >= FACE_ID_SAVE_NUMBER) {
-          Serial.println("Max enrolled faces reached");
-          break;
-        }
-
-        // Construct the image path: /sdcard/yung/face1.jpg ... face7.jpg
-        String imagePath = "/" + folder + "/face" + i + ".jpg";
-        Serial.printf("Opening %s\n", imagePath.c_str());
-
-        File file = SD_MMC.open(imagePath.c_str());
-        if (!file) {
-            Serial.printf("Failed to open %s\n", imagePath.c_str());
-            continue;
-        }
-
-        size_t file_size = file.size();
-        uint8_t *jpg_buf = (uint8_t *)malloc(file_size);
-        if (!jpg_buf) {
-            Serial.println("Failed to allocate JPG buffer");
-            file.close();
-            continue;
-        }
-
-        file.read(jpg_buf, file_size);
-        file.close();
-        Serial.println("File read and closed");
-
-        uint8_t *rgb_buf = (uint8_t *)malloc(320 * 240 * 3);
-        if (!rgb_buf) {
-            Serial.println("Failed to allocate RGB buffer");
-            free(jpg_buf);
-            continue;
-        }
-
-        if (!fmt2rgb888(jpg_buf, file_size, PIXFORMAT_JPEG, rgb_buf)) {
-            Serial.println("JPEG decode failed");
-            free(jpg_buf);
-            free(rgb_buf);
-            continue;
-        }
-
-        // Detect face
-        std::list<dl::detect::result_t> &candidates = s1.infer(rgb_buf, {240, 320, 3});
-        std::list<dl::detect::result_t> &results = s2.infer(rgb_buf, {240, 320, 3}, candidates);
-        if (results.empty()) {
-            Serial.printf("No face detected in %s\n", imagePath.c_str());
-            free(jpg_buf);
-            free(rgb_buf);
-            continue;
-        }
-
-        // Prepare tensor
-        Tensor<uint8_t> tensor;
-        tensor.set_element(rgb_buf)
-              .set_shape({240, 320, 3})
-              .set_auto_free(false);
-
-        // Enroll face
-        int enrolled_id = recognizer.enroll_id(tensor, results.front().keypoint, "", true);
-        Serial.printf("Enrolled face from %s as ID: %d\n", imagePath.c_str(), enrolled_id);
-
-        free(jpg_buf);
-        free(rgb_buf);
-    }
-
-    SD_MMC.end();
-    Serial.println("SD Card unmounted");
-}
 
 void setup() {
     Serial.begin(115200);
@@ -613,64 +493,513 @@ void thingsboardTask(void* pv) {
   }
 }
 
-void sendCommand(const String& cmd) {
-  Serial.print("Sending: "); Serial.println(cmd);
-  SerialPort.println(cmd);
-}
-
-String receiveData() {
-  unsigned long start = millis();
-  Serial.print("waiting.....");
-  while (millis() - start < 3000) {
-    if (SerialPort.available()) {
-      Serial.print("receiving.....");
-      String line = SerialPort.readStringUntil('\n');
-      line.trim();
-      if (line.length() > 0) return line;
+// Sensor task (same as original)
+void sensorTask(void* pv) {
+  for (;;) {
+    float temp = 0.0;
+    if (bmp.begin(0x76)) {
+      temp = bmp.readTemperature();
     }
-  }
-  return "";
-}
-
-void uploadToFirebase(const String& dataLine) {
-  // Format: "DATA,123.45,67.89,45.67,90.12,34.56,12.34"
-  int startIdx =5; // after "DATA,"
-  int sensorIndex = 1;
-  Serial.println("Uploading....");
-  while (sensorIndex <= 1) {
-    Serial.println("Uploading2....");
-    int endIdx = dataLine.indexOf(',', startIdx);
-    if (endIdx == -1 && sensorIndex < 1) break; // malformed
-
-    String value;
-    if (sensorIndex < 6) {
-      value = dataLine.substring(startIdx, endIdx);
-      startIdx = endIdx + 1;
-    } else {
-      value = dataLine.substring(startIdx);
+    
+    String response = sendCommandAndWait("REQ_HX711", 3000);
+    
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+      sharedTemp = temp;
+      if (!response.isEmpty() && response != "TIMEOUT") {
+        parseHX711Data(response);
+      }
+      xSemaphoreGive(dataMutex);
     }
-    Serial.println(value);
-    String path = "Medcare/pillbox" + String(sensorIndex);
-    if (Firebase.RTDB.setFloat(&fbdo, path, value.toFloat())) {
-      Serial.println("Updated " + path + ": " + value);
-    } else {
-      Serial.println("Firebase error at " + path + ": " + fbdo.errorReason());
-    }
-
-    sensorIndex++;
+    Serial.printf("Temperatue: %.2f", temp);
+    vTaskDelay(2000 / portTICK_PERIOD_MS);
   }
 }
+// Face recognition task - modified registration mode
+void faceRecognitionTask(void* pv) {
+  // Suspend other tasks for better performance
+  if (thingsboardTaskHandle != NULL) {
+    vTaskSuspend(thingsboardTaskHandle);
+    Serial.println("Thingsboard task suspended");
+  }
+  if (sensorTaskHandle != NULL) {
+    vTaskSuspend(sensorTaskHandle);
+    Serial.println("Sensor task suspended");
+  }
+  Serial.println("Face recognition task started");
+  
+  bool isRegisterMode = registerFlag;
+  
+  if (isRegisterMode) {
+    // Register mode - capture and save 7 JPEG images ONLY when face is detected
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Registration");
+    lcd.setCursor(0, 1);
+    lcd.print("Mode");
+    delay(2000);
 
-void waitForAck() {
-  unsigned long start = millis();
-  while (millis() - start < 5000) {
-    if (SerialPort.available()) {
-      String ack = SerialPort.readStringUntil('\n');
-      if (ack == "ACK") {
-        Serial.println("Motor operation acknowledged.");
-        return;
+    // Create directory for user
+    String userDir = "/user_" + faceEnrollID;
+    Serial.println("Checking SD folder: " + userDir);
+    if (!SD_MMC.exists(userDir)) {
+      SD_MMC.mkdir(userDir);
+    }
+
+    int capturedImages = 0;
+    const uint32_t registrationTimeout = 60000; // 60 seconds timeout
+    uint32_t startTime = millis();
+
+    while (capturedImages < 7 && (millis() - startTime < registrationTimeout)) {
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Look at camera");
+      lcd.setCursor(0, 1);
+      lcd.print("Images: ");
+      lcd.print(capturedImages);
+      lcd.print("/7");
+      Serial.println("Capturing image...");
+
+      camera_fb_t *fb = esp_camera_fb_get();
+      if (!fb) {
+        Serial.println("Camera capture failed");
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        continue;
+      }
+
+      // Convert frame to RGB for face detection
+      uint8_t *rgb_buf = (uint8_t *)malloc(fb->width * fb->height * 3);
+      if (!rgb_buf) {
+        esp_camera_fb_return(fb);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        continue;
+      }
+
+      bool faceDetected = false;
+      if (fmt2rgb888(fb->buf, fb->len, fb->format, rgb_buf)) {
+        auto faces = detect_faces(fb, rgb_buf);
+
+        if (!faces.empty()) {
+          faceDetected = true;
+          Serial.println("Face detected for registration!");
+
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Face Detected!");
+          lcd.setCursor(0, 1);
+          lcd.print("Saving...");
+
+          // Convert to JPEG before saving
+          uint8_t *jpg_buf = NULL;
+          size_t jpg_len = 0;
+          bool success = frame2jpg(fb, 80, &jpg_buf, &jpg_len); // 80 = JPEG quality
+
+          if (success) {
+            String filename = userDir + "/face" + String(capturedImages) + ".jpg";
+            File file = SD_MMC.open(filename, FILE_WRITE);
+            if (file) {
+              file.write(jpg_buf, jpg_len);
+              file.close();
+              Serial.printf("Saved JPEG: %s (%d bytes)\n", filename.c_str(), jpg_len);
+
+              capturedImages++;
+
+              lcd.clear();
+              lcd.setCursor(0, 0);
+              lcd.print("Image ");
+              lcd.print(capturedImages);
+              lcd.print(" saved!");
+              lcd.setCursor(0, 1);
+              lcd.print("Move slightly");
+              delay(1500);
+            } else {
+              Serial.println("Failed to open file for writing: " + filename);
+            }
+            free(jpg_buf);
+          } else {
+            Serial.println("JPEG conversion failed");
+          }
+        }
+      }
+
+      free(rgb_buf);
+      esp_camera_fb_return(fb);
+
+      if (!faceDetected) {
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+      } else {
+        vTaskDelay(1000 / portTICK_PERIOD_MS);
+      }
+    }
+
+    // Registration result
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Registration");
+    if (capturedImages >= 7) {
+      lcd.setCursor(0, 1);
+      lcd.print("Complete!");
+      Serial.println("Registration completed successfully with " + String(capturedImages) + " images");
+// Alternative: Direct directory listing approach
+String allUsers = "";
+
+// Method 1: Using listDir function if available
+Serial.println("Scanning SD card root directory...");
+
+File root = SD_MMC.open("/");
+if (!root) {
+  Serial.println("Failed to open root directory");
+} else if (!root.isDirectory()) {
+  Serial.println("Root is not a directory");
+  root.close();
+} else {
+  Serial.println("Root directory opened successfully");
+  
+  // Reset and scan
+  root.rewindDirectory();
+  
+  File file = root.openNextFile();
+  int fileCount = 0;
+  
+  while (file) {
+    fileCount++;
+    String fileName = String(file.name());
+    Serial.printf("File %d: %s (isDir: %s)\n", fileCount, fileName.c_str(), file.isDirectory() ? "YES" : "NO");
+    
+    if (file.isDirectory()) {
+      // Remove leading slash if present
+      String folderName = fileName;
+      if (folderName.startsWith("/")) {
+        folderName = folderName.substring(1);
+      }
+      
+      // Check for user_ prefix
+      if (folderName.startsWith("user_") && folderName.length() > 5) {
+        String username = folderName.substring(5);
+        Serial.println("Extracting username: " + username);
+        
+        if (!allUsers.isEmpty()) allUsers += ", ";
+        allUsers += username;
+      }
+    }
+    
+    file.close();
+    file = root.openNextFile();
+  }
+  
+  root.close();
+  Serial.printf("Scanned %d items total\n", fileCount);
+}
+
+// Debug output
+Serial.println("Final allUsers string: '" + allUsers + "'");
+
+// Now send as telemetry to ThingsBoard
+String telemetryPayload = "{\"userList\":\"" + allUsers + "\", \"last_registered_user\":\"" + faceEnrollID + "\"}";
+mqttClient.publish("v1/devices/me/telemetry", telemetryPayload.c_str());
+
+
+    } else {
+      lcd.setCursor(0, 1);
+      lcd.print("Timeout!");
+      Serial.println("Registration timeout - only captured " + String(capturedImages) + " images");
+    }
+
+    delay(3000);
+  } else {
+    // Recognition mode - same as original recognize logic
+    enroll_faces_from_sd(faceEnrollID);
+    
+    camera_fb_t *fb;
+    uint8_t *buf;
+    bool ok = false;
+    const uint32_t timeout = 30000;
+    uint32_t startTime = millis();
+    
+    Serial.println("Starting live face recognition...");
+    
+    while (!ok && (millis() - startTime < timeout)) {
+      fb = esp_camera_fb_get();
+      if (!fb) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        continue;
+      }
+      
+      buf = (uint8_t*)malloc(fb->width * fb->height * 3);
+      if (!buf) {
+        esp_camera_fb_return(fb);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+        continue;
+      }
+      
+      if (fmt2rgb888(fb->buf, fb->len, fb->format, buf)) {
+        auto faces = detect_faces(fb, buf);
+        
+        if (!faces.empty()) {
+          Serial.println("Face Detected!");
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Face Detected");
+          lcd.setCursor(0, 1);
+          lcd.print("Recognizing...");
+          
+          ok = recognize_faces(buf, fb->width, fb->height, faces, faceEnrollID);
+          
+          if (ok) {
+            Serial.println("Face recognition successful!");
+          }
+        }
+      }
+      
+      free(buf);
+      esp_camera_fb_return(fb);
+      vTaskDelay(200 / portTICK_PERIOD_MS);
+    }
+    
+    // Cleanup enrolled faces
+    for (int i = 0; i < 7; i++) {
+      recognizer.delete_id(i);
+    }
+    
+    if (ok && startButtonPressed) {
+      pillboxTrigger = true;
+    }
+
+  }
+  
+  // Reset flags
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(1000))) {
+
+    faceEnrollID = "";
+    faceTaskRunning = false;
+    registerFlag = false;
+    startButtonPressed = false;
+    xSemaphoreGive(dataMutex);
+  }
+  // Resume suspended tasks
+  if (thingsboardTaskHandle != NULL) {
+    vTaskResume(thingsboardTaskHandle);
+    Serial.println("Thingsboard task resumed");
+  }
+  if (sensorTaskHandle != NULL) {
+    vTaskResume(sensorTaskHandle);
+    Serial.println("Sensor task resumed");
+  }
+  
+  Serial.println("Face recognition task completed");
+  
+  // Clear task handle and delete task
+  faceTaskHandle = NULL;
+  vTaskDelete(NULL);
+}
+// Simplified Pillbox Control Task
+void pillboxControlTask(void* pv) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dispensing");
+  lcd.setCursor(0, 1);
+  lcd.print("Pills...");
+  Serial.println("Dispensing pills");
+  for (int i = 0; i < 4; i++) {
+    if (pillboxFlags[i]) {
+      Serial.printf("Dispensing from pillbox %d\n", i+1);
+      
+      String command = "PILLBOX_" + String(i+1);
+      String response = sendCommandAndWait(command, 5000);
+      
+      if (response == "COMPLETE") {
+        Serial.printf("Pillbox %d dispensed successfully\n", i+1);
+      } else {
+        Serial.println("Dispense failed: " + response);
       }
     }
   }
-  Serial.println("ACK not received (timeout).");
+  
+  for (int i = 0; i < 4; i++) pillboxFlags[i] = false;
+
+  Serial.println("Dispensing Complete");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Dispensing");
+  lcd.setCursor(0, 1);
+  lcd.print("Complete");
+  delay(3000);
+  
+  pillboxTaskRunning = false;
+  vTaskDelete(NULL);
+}
+
+// Keep original UART, face detection, and utility functions...
+// (uartCommunicationTask, sendCommandAndWait, parseHX711Data, 
+//  detect_faces, recognize_faces, enroll_faces_from_sd functions remain the same)
+// ======================== UART COMMUNICATION ======================== //
+
+void uartCommunicationTask(void* pv) {
+  char cmdBuf[50];
+  char respBuf[50];
+  
+  for (;;) {
+    if (xQueueReceive(uartCmdQueue, cmdBuf, portMAX_DELAY)) {
+      SerialPort.println(cmdBuf);
+      Serial.println("UART Sent: " + String(cmdBuf));
+      
+      // Wait for response
+      uint32_t startTime = millis();
+      bool responseReceived = false;
+      String response = "";
+      
+      while (millis() - startTime < 3000 && !responseReceived) {
+        if (SerialPort.available()) {
+          response = SerialPort.readStringUntil('\n');
+          response.trim();
+          if (!response.isEmpty()) {
+            response.toCharArray(respBuf, sizeof(respBuf));
+            xQueueSend(uartRespQueue, respBuf, 0);
+            responseReceived = true;
+            Serial.println("UART Received: " + response);
+          }
+        }
+        delay(10);
+      }
+      
+      if (!responseReceived) {
+        strcpy(respBuf, "TIMEOUT");
+        xQueueSend(uartRespQueue, respBuf, 0);
+      }
+    }
+  }
+}
+
+String sendCommandAndWait(const String& cmd, uint32_t timeout) {
+  char cmdBuf[50];
+  char respBuf[50];
+  cmd.toCharArray(cmdBuf, sizeof(cmdBuf));
+  
+  String response = "TIMEOUT";
+  
+  if (xQueueSend(uartCmdQueue, cmdBuf, pdMS_TO_TICKS(100))) {
+    if (xQueueReceive(uartRespQueue, respBuf, pdMS_TO_TICKS(timeout))) {
+      response = String(respBuf);
+    }
+  }
+  
+  return response;
+}
+std::list<dl::detect::result_t> detect_faces(camera_fb_t *fb,uint8_t *buf){
+  std::list<dl::detect::result_t> r;
+  auto c = s1.infer(buf,{fb->height,fb->width,3});
+    r = s2.infer(buf,{fb->height,fb->width,3},c);
+  return r;
+}
+bool recognize_faces(uint8_t *frame_data,int w,int h,std::list<dl::detect::result_t> &faces, String id){
+
+  Tensor<uint8_t> t; t.set_element(frame_data).set_shape({h,w,3}).set_auto_free(false);
+  for(auto &f:faces){
+    face_info_t info = recognizer.recognize(t,f.keypoint);
+    if(info.id>=0){
+      Serial.printf("Recognized ID %s (%.2f)\n", id,info.similarity);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("Face Detected");
+      lcd.setCursor(0, 1);
+      lcd.print("ID:");
+      lcd.print(id);
+      lcd.print(" C:");
+      lcd.printf("%.2f", info.similarity); // Show confidence as int
+      delay(30);
+      return true;
+    }
+    else{
+      Serial.println("Unknown face");
+    }
+  }
+  return false;
+}
+
+
+void enroll_faces_from_sd(String folder) {
+  if (!SD_MMC.begin("/sdcard", true)) {
+    Serial.println("SD Card Mount Failed");
+    return;
+  }
+  
+  // Create folder if not exists
+  if (!SD_MMC.exists("/user_" + folder)) {
+    SD_MMC.mkdir("/user_" + folder);
+  }
+  
+  for (int i = 0; i < 7; ++i) {
+    String imagePath = "/user_" + folder + "/face" + i + ".jpg";
+    
+    if (!SD_MMC.exists(imagePath)) {
+      Serial.printf("File not found: %s\n", imagePath.c_str());
+      continue;
+    }
+    
+    File file = SD_MMC.open(imagePath);
+    if (!file) {
+      Serial.printf("Failed to open %s\n", imagePath.c_str());
+      continue;
+    }
+    
+    size_t file_size = file.size();
+    if (file_size > JPG_BUF_SIZE) {
+      Serial.printf("File too large: %s (%d bytes)\n", imagePath.c_str(), file_size);
+      file.close();
+      continue;
+    }
+    
+    file.read(jpgBuffer, file_size);
+    file.close();
+    
+    // Convert JPEG to RGB
+    if (!fmt2rgb888(jpgBuffer, file_size, PIXFORMAT_JPEG, rgbBuffer)) {
+      Serial.println("JPEG decode failed");
+      continue;
+    }
+    
+    // Detect faces
+    auto candidates = s1.infer(rgbBuffer, {240, 320, 3});
+    auto results = s2.infer(rgbBuffer, {240, 320, 3}, candidates);
+    
+    if (results.empty()) {
+      Serial.printf("No face detected in %s\n", imagePath.c_str());
+      continue;
+    }
+    
+    // Enroll first face found
+    Tensor<uint8_t> tensor;
+    tensor.set_element(rgbBuffer).set_shape({240, 320, 3}).set_auto_free(false);
+    
+    for (auto &face : results) {
+      int enrolled_id = recognizer.enroll_id(tensor, face.keypoint, "", true);
+        Serial.printf("Enrolled face from %s as ID: %d\n", imagePath.c_str(), enrolled_id);
+        face_info_t recognition = recognizer.recognize(tensor, face.keypoint);
+        if (recognition.id >= 0) {
+            Serial.printf("Recognized Face ID: %d (Confidence: %.2f)\n",
+                        recognition.id, recognition.similarity);
+        } else {
+            Serial.println("Unknown Face Detected");
+        }
+    }
+  }
+  SD_MMC.end();
+}
+void parseHX711Data(const String& dataLine) {
+  if (!dataLine.startsWith("DATA,")) {
+    Serial.println("Invalid HX711 data format");
+    return;
+  }
+  
+  int startIdx = 5; // Skip "DATA,"
+  int sensorIndex = 0;
+  int lastComma = startIdx;
+  
+  while (sensorIndex < 4 && lastComma < dataLine.length()) {
+    int nextComma = dataLine.indexOf(',', lastComma + 1);
+    if (nextComma == -1) nextComma = dataLine.length();
+    
+    String valueStr = dataLine.substring(lastComma, nextComma);
+    hx711Data[sensorIndex++] = valueStr.toFloat();
+    lastComma = nextComma + 1;
+  }
 }
