@@ -20,35 +20,22 @@
 #include <PubSubClient.h>
 
 #include <HardwareSerial.h>  
-// UART Configuration
-#define UART_TX_PIN 21  // GPIO17 (TX)
-#define UART_RX_PIN 47  // GPIO16 (RX)
+// ThingsBoard Configuration
+const char* mqttServer = "thingsboard.cloud";
+const char* token = "LLmv2iTL8jMUQczlMte0"; // Replace with your device token
+
+#define UART_TX_PIN 21
+#define UART_RX_PIN 47
+
+// MQTT and WiFi clients
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
 HardwareSerial SerialPort(2);  // Use UART1
 
 // Sensor Data Buffer
 float sensorData[6];
 
 #define RELAY_PIN 16
-
-const char* ssid = "YUNG";
-const char* password = "yung0608";
-
-// Insert Authorized Email and Corresponding Password
-#define USER_EMAIL "yyss08686@gmail.com"
-#define USER_PASSWORD "yung0608"
-
-// Insert Firebase project API Key
-#define API_KEY "AIzaSyDB70uJdPvJjHi8gvLtqR4VFpUaQzOw8f8"
-// Insert Firebase storage bucket ID e.g bucket-name.appspot.com
-#define STORAGE_BUCKET_ID "medcare-92416.firebasestorage.app"
-// Define Firebase Data object
-#define DATABASE_URL "https://medcare-92416-default-rtdb.asia-southeast1.firebasedatabase.app/"
-/* 4. Define the Firebase storage bucket ID e.g bucket-name.appspot.com */
-
-
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config2;
 
 unsigned long sendDataPrevMillis = 0;
 String id = "";
@@ -421,249 +408,172 @@ void setup() {
   ra_filter_init(&ra_filter, RA_FILTER_SIZE);
 }
 void loop() {
-  if (Firebase.ready() && (millis()- sendDataPrevMillis > 5000 || sendDataPrevMillis ==0)){
-    Serial.println("Reading data from firebase");
-    sendDataPrevMillis = millis();
-    //-----read register start?
-    if(Firebase.RTDB.getBool(&fbdo, "/Medcare/register")){
-      if(fbdo.dataType()=="boolean" && fbdo.boolData()){ 
-        Serial.print("New Register/n");
-        if(Firebase.RTDB.getString(&fbdo, "/Medcare/Userface/id")){
-          if(fbdo.dataType()=="string"){
-            id = fbdo.stringData();
-            Serial.printf("Download %s data.../n", id);
-            for(int i = 0; i <7; i++){
-              String firebasePath = id + "/" + "face" + i;
-              String localPath = "/" + id + "/" + "face" + i + ".jpg";                
-                  // Let Firebase handle file operations automatically
-              if (!Firebase.Storage.download(&fbdo, STORAGE_BUCKET_ID, 
-                                                         firebasePath.c_str(), 
-                                                            localPath.c_str(), 
-                                               mem_storage_type_flash, 
-                                                fcsDownloadCallback)){
-                Serial.println(firebasePath + " download fail: " + fbdo.errorReason());
-              }
-              if (copyFile(LittleFS, localPath, SD_MMC, localPath, id)){
-                Serial.println("Image copied to SD card");
-                if (LittleFS.remove(localPath)) {
-                  Serial.println("Deleted image from LittleFS");
-                } 
-                else {
-                  Serial.println("Failed to delete image from LittleFS");
-                }
-              } 
-              else {
-                  Serial.println("❌ Copy failed");
-              } 
-              // Verify download after completion
-              File file = SD_MMC.open(localPath);
-              if(file) {
-                Serial.printf("Final file size: %d bytes\n", file.size());
-                file.close();
-              }
-            }
-            if(Firebase.RTDB.setBool(&fbdo, "Medcare/register", false)){
-              Serial.printf("%s info downloaded", id);
-            }
-          }
-        }      
-      }
-    }
-  }
-  if(Firebase.RTDB.getBool(&fbdo, "Medcare/ForceStart")){
-    if(fbdo.dataType() == "boolean" && fbdo.boolData()){
-      Serial.println("ForcedStarting.........");
-      camera_fb_t *fb = NULL;
-      uint8_t *converted_buf = NULL;
-      bool buffer_converted = false;
-      if(Firebase.RTDB.getString(&fbdo, "Medcare/id")){
-        //if(fbdo.dataType() == "String"){
-          id = fbdo.stringData();
-          enroll_faces_from_sd(id);
-          faceRecognized = true;
-          while(faceRecognized==true){
-            Serial.println("Start");
-            fb = esp_camera_fb_get();
-            if (!fb) {
-              Serial.print("no image");
-              continue;}
-            lcd.clear();
-            // set cursor to first column, first row
-            lcd.setCursor(0, 0);
-            // print message
-            lcd.print("Capturing");
-            Serial.println("Capturing....");
-            delay(10);
-            // Convert frame if necessary
-            if (fb->format != PIXFORMAT_RGB888) {
-              converted_buf = (uint8_t*)malloc(fb->width * fb->height * 3);
-              if (fmt2rgb888(fb->buf, fb->len, fb->format, converted_buf)) {
-              buffer_converted = true;
-              Serial.println("done converting");
-              }
-            }
-            Serial.print("detecting face.....");
-            // Step 1: Face Detection
-            auto detected_faces = detect_faces(fb, converted_buf); 
-            Serial.print("Done detect");
-            if (!detected_faces.empty()) {
-              Serial.print("face detected......");
-              lcd.clear();
-              // set cursor to first column, first row
-              lcd.setCursor(0, 0);
-              // print message
-              lcd.printf("Detcted faces\n");
-              delay(1000);    
-              // Step 2: Face Recognition
-              if (recognition_enabled) {
-                faceRecognized = recognize_faces(
-                buffer_converted ? converted_buf : fb->buf,
-                fb->width,
-                fb->height,
-                detected_faces
-                );
-              }
-            }
-            else{
-              Serial.print("No face Detected");
-              faceRecognized = true;
-            }
-            Serial.println("After recognizing");
-            // Cleanup
-            if (buffer_converted) {
-              free(converted_buf);
-              buffer_converted = false;
-            }
-            esp_camera_fb_return(fb);
-            delay(100);
-            Serial.println("after free");
-            Serial.println("Repeat");
-          }
-          for(int i = 0; i <7; i++){
-            if(recognizer.delete_id(i) != ESP_FAIL){
-              Serial.printf("id %d deteleted\n", i);
-            }
-          }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox1")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,1,300");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                  delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,0,300");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox2")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,1,200");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                  delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,0,200");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox3")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,1,100");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                  delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,0,100");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox4")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,0,100");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                  delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,1,100");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox5")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,0,200");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                  delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,1,200");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }
-              if(Firebase.RTDB.getBool(&fbdo, "Medcare/TakePillbox6")){
-                if(fbdo.boolData()){
-                  sendCommand("RUN_MOTOR1,0,300");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, HIGH);
-                delay(100);
-                  sendCommand("RUN_MOTOR2,1,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR2,0,200");
-                  waitForAck();
-                  sendCommand("RUN_MOTOR1,1,300");
-                  waitForAck();
-                  digitalWrite(RELAY_PIN, LOW);
-                  delay(100);
-                }
-              }              
-          if(Firebase.RTDB.setBool(&fbdo, "Medcare/ForceStart", false)){
-            Serial.print("Done yung");
-          }
-          delay(1000);
-       // }
-      }    
-    }
-  }
-  if(Firebase.RTDB.setFloat(&fbdo, "Medcare/Temperature", bmp.readTemperature())){
-    Serial.println("Uploaded Temperature");
-  } 
-  delay(100);
-  sendCommand("REQ_HX711");
-  // Wait for and parse the response
-  String data = receiveData();
-  if (data.length() > 0) {
-    Serial.println("Received: " + data);
-    if (data.startsWith("DATA,")) {
-      uploadToFirebase(data);
-    }
   }
 
-
+// WiFi setup function
+void setupWiFi() {
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting to");
+  lcd.setCursor(0, 1);
+  lcd.print("WiFi....");
+  
+  WiFiManager wm;
+  wm.setConnectTimeout(60);
+  wm.setConfigPortalTimeout(180);
+  
+  bool res = wm.autoConnect("ESP32_AP", "12345678");
+  
+  if (!res) {
+    Serial.println("Failed to connect.");
+    lcd.clear();
+    lcd.print("WiFi Failed!");
+    delay(3000);
+    ESP.restart();
+  } else {
+    Serial.println("Connected!");
+    Serial.println(WiFi.localIP());
+    lcd.clear();
+    lcd.print("Connected!");
+    delay(1000);
+  }
 }
+
+// MQTT reconnection function
+void reconnectMQTT() {
+  while (!mqttClient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    String clientId = "ESP32Client-";
+    clientId += String(random(0xffff), HEX);
+    if (mqttClient.connect(clientId.c_str(), token, "")) {
+      Serial.println("connected");
+      // Subscribe to RPC commands
+      mqttClient.subscribe("v1/devices/me/rpc/request/+");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttClient.state());
+      Serial.println(" - trying again in 5 seconds");
+      delay(5000);
+    }
+  }
+}
+
+// MQTT message callback - handles register and start button commands
+void onMqttMessage(char* topic, byte* payload, unsigned int length) {
+  payload[length] = '\0';
+  String message = String((char*)payload);
+  String topicStr = String(topic);
+  
+  Serial.println("Received: " + topicStr + " - " + message);
+  
+  DynamicJsonDocument doc(1024);
+  deserializeJson(doc, message);
+  
+  String method = doc["method"];
+  
+  if (method == "register") {
+    String username = doc["params"]["username"];
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+      faceEnrollID = username;
+      registerFlag = true;
+      xSemaphoreGive(dataMutex);
+    }
+    
+    // Send response
+    String responsePayload = "{\"success\":true}";
+    String responseTopic = topicStr;
+    responseTopic.replace("request", "response");
+    mqttClient.publish(responseTopic.c_str(), responsePayload.c_str());
+    
+  } else if (method == "startButton") {
+    int pillboxId = doc["params"]["pillboxId"];
+    String username = doc["params"]["username"];
+    
+    if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+      faceEnrollID = username;
+      startButtonPressed = true;
+      for (int i = 0; i < 4; i++) pillboxFlags[i] = false;
+      if (pillboxId >= 1 && pillboxId <= 4) {
+        pillboxFlags[pillboxId - 1] = true;
+      }
+      xSemaphoreGive(dataMutex);
+    }
+    
+    // Send response
+    String responsePayload = "{\"success\":true}";
+    String responseTopic = topicStr;
+    responseTopic.replace("request", "response");
+    mqttClient.publish(responseTopic.c_str(), responsePayload.c_str());
+  }
+  else if (method == "getUserList") {
+  DynamicJsonDocument respDoc(512);
+  JsonArray arr = respDoc.to<JsonArray>();
+
+  File root = SD_MMC.open("/");
+  if (root && root.isDirectory()) {
+    File file = root.openNextFile();
+    while (file) {
+      if (file.isDirectory()) {
+    String folderName = String(file.name()).substring(1); // remove leading slash
+    if (folderName.startsWith("user_")) {
+        arr.add(folderName.substring(5)); // Remove "user_" prefix
+    }
+}
+
+      file = root.openNextFile();
+    }
+  }
+
+  String responsePayload;
+  serializeJson(respDoc, responsePayload);
+
+  String responseTopic = topicStr;
+  responseTopic.replace("request", "response");
+  mqttClient.publish(responseTopic.c_str(), responsePayload.c_str());
+}
+}
+
+// ThingsBoard task - replaces Firebase task
+void thingsboardTask(void* pv) {
+  for (;;) {
+    if (!mqttClient.connected()) {
+      reconnectMQTT();
+    }
+    mqttClient.loop();
+    
+    // Upload sensor data every 5 seconds
+    static uint32_t lastUpload = 0;
+    if (millis() - lastUpload > 5000) { 
+      float tempCopy;
+      float hxCopy[4];
+      
+      if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+        tempCopy = sharedTemp;
+        memcpy(hxCopy, hx711Data, sizeof(hxCopy));
+        xSemaphoreGive(dataMutex);
+      } else {
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+        continue;
+      }
+      
+      // Create JSON payload
+      char payload[256];
+      snprintf(payload, sizeof(payload), 
+        "{\"temperature\":%.2f,\"pillbox1\":%.2f,\"pillbox2\":%.2f,\"pillbox3\":%.2f,\"pillbox4\":%.2f}",
+        tempCopy, hxCopy[0], hxCopy[1], hxCopy[2], hxCopy[3]);
+      
+      if (mqttClient.publish("v1/devices/me/telemetry", payload)) {
+        Serial.println("Telemetry data published");
+      } else {
+        Serial.println("Publish failed");
+      }
+      
+      lastUpload = millis();
+    }
+    
+    vTaskDelay(200 / portTICK_PERIOD_MS);
+  }
+}
+
 void sendCommand(const String& cmd) {
   Serial.print("Sending: "); Serial.println(cmd);
   SerialPort.println(cmd);
