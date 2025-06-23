@@ -13,20 +13,11 @@
 #include "SD_MMC.h"
 #include <LiquidCrystal_I2C.h>
 #include <Adafruit_BMP280.h>
-#include <nvs_flash.h>
-// Provide the token generation process info.
-#include <addons/TokenHelper.h>
-#if defined(ESP32) || defined(ARDUINO_RASPBERRY_PI_PICO_W)
+#include "esp_task_wdt.h"
+#include <WiFiManager.h>
+#include <ArduinoJson.h>
 #include <WiFi.h>
-#elif defined(ESP8266)
-#include <ESP8266WiFi.h>
-#elif __has_include(<WiFiNINA.h>)
-#include <WiFiNINA.h>
-#elif __has_include(<WiFi101.h>)
-#include <WiFi101.h>
-#elif __has_include(<WiFiS3.h>)
-#include <WiFiS3.h>
-#endif
+#include <PubSubClient.h>
 
 #include <HardwareSerial.h>  
 // UART Configuration
