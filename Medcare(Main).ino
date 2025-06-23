@@ -381,6 +381,72 @@ void setup() {
 }
 
 void loop() {
+    static uint32_t lastDisplay = 0;
+  
+  if (millis() - lastDisplay > 5000) {
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("Temp: ");
+    lcd.print(sharedTemp, 1);
+    lcd.print("C");
+    
+    lastDisplay = millis();
+  }
+  
+  // Face recognition trigger - when register or start button pressed
+  if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(10))) {
+    bool shouldStartFace = !faceTaskRunning && (registerFlag || startButtonPressed);
+    xSemaphoreGive(dataMutex);
+
+    if (shouldStartFace) {
+      Serial.println("Starting face recognition task");
+      faceTaskRunning = true;
+      
+      BaseType_t result = xTaskCreatePinnedToCore(
+        faceRecognitionTask, 
+        "FaceRecog", 
+        32768,
+        NULL, 
+        4,
+        &faceTaskHandle, 
+        1
+      );
+      
+      if (result != pdPASS) {
+        Serial.println("Failed to create face recognition task");
+        if (xSemaphoreTake(dataMutex, pdMS_TO_TICKS(100))) {
+          faceTaskRunning = false;
+          registerFlag = false;
+          startButtonPressed = false;
+          xSemaphoreGive(dataMutex);
+        }
+      }
+    }
+    if (pillboxTrigger && !pillboxTaskRunning) {
+  pillboxTaskRunning = true;
+  pillboxTrigger = false;
+
+  BaseType_t result = xTaskCreatePinnedToCore(
+    pillboxControlTask,
+    "PillboxControl",
+    8192,
+    NULL,
+    2,
+    &pillboxTaskHandle,
+    1
+  );
+
+  if (result != pdPASS) {
+    Serial.println("Failed to create PillboxControl task from loop");
+    pillboxTaskRunning = false;
+  } else {
+    Serial.println("PillboxControl task created from loop");
+  }
+}
+  }
+  
+  esp_task_wdt_reset();
+  delay(100);
   }
 
 // WiFi setup function
